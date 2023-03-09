@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 )
 
 var SHARD_COUNT = 32
@@ -22,21 +23,51 @@ type LRUCache[K comparable, V any] struct {
 
 // A "thread" safe string to anything map.
 type LRUCacheShard[K comparable, V any] struct {
-	items        map[K]V
+	items        map[K]*node[V]
+	linkedList   *doubleLinkedList[V]
 	sync.RWMutex // Read Write mutex, guards access to internal map.
 }
 
 func (m *LRUCacheShard[K, V]) Delete(key K) {
+	n, ok := m.items[key]
+	if ok {
+		n.CutOff()
+	}
+
 	delete(m.items, key)
 }
 
-func (m *LRUCacheShard[K, V]) Set(key K, value V) {
-	m.items[key] = value
+func (m *LRUCacheShard[K, V]) Set(key K, value V, expire time.Duration) {
+	var n *node[V]
+	var ok bool
+	n, ok = m.items[key]
+	if !ok {
+		n = newNode(value, expire)
+	} else {
+		n.CutOff()
+		n.SetValWithExpire(value, expire)
+	}
+
+	m.items[key] = n
+	m.linkedList.Prepend(n)
 }
 
 func (m *LRUCacheShard[K, V]) Get(key K) (V, bool) {
-	v, ok := m.items[key]
-	return v, ok
+	n, ok := m.items[key]
+	var value V
+	if ok = ok && !n.IsExpire(); ok {
+		value = n.Val()
+		n.CutOff()
+		m.linkedList.Prepend(n)
+	}
+	return value, ok
+}
+
+func createShard[K comparable, V any]() *LRUCacheShard[K, V] {
+	return &LRUCacheShard[K, V]{
+		items:      make(map[K]*node[V]),
+		linkedList: newDoubleLinkedList[V](),
+	}
 }
 
 func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
@@ -45,7 +76,7 @@ func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
 		shards:   make([]*LRUCacheShard[K, V], SHARD_COUNT),
 	}
 	for i := 0; i < SHARD_COUNT; i++ {
-		m.shards[i] = &LRUCacheShard[K, V]{items: make(map[K]V)}
+		m.shards[i] = createShard[K, V]()
 	}
 	return m
 }
@@ -71,20 +102,28 @@ func (m LRUCache[K, V]) GetShard(key K) *LRUCacheShard[K, V] {
 }
 
 func (m LRUCache[K, V]) MSet(data map[K]V) {
+	m.MSetWithExpire(data, 0)
+}
+
+func (m LRUCache[K, V]) MSetWithExpire(data map[K]V, expire time.Duration) {
 	for key, value := range data {
 		shard := m.GetShard(key)
 		shard.Lock()
-		shard.Set(key, value)
+		shard.Set(key, value, expire)
 		shard.Unlock()
 	}
 }
 
 // Sets the given value under the specified key.
 func (m LRUCache[K, V]) Set(key K, value V) {
+	m.SetWithExpire(key, value, 0)
+}
+
+func (m LRUCache[K, V]) SetWithExpire(key K, value V, expire time.Duration) {
 	// Get map shard.
 	shard := m.GetShard(key)
 	shard.Lock()
-	shard.Set(key, value)
+	shard.Set(key, value, expire)
 	shard.Unlock()
 }
 
@@ -96,23 +135,31 @@ type UpsertCb[V any] func(exist bool, valueInMap V, newValue V) V
 
 // Insert or Update - updates existing element or inserts a new one using UpsertCb
 func (m LRUCache[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
+	return m.UpsertWithExpire(key, value, 0, cb)
+}
+
+func (m LRUCache[K, V]) UpsertWithExpire(key K, value V, expire time.Duration, cb UpsertCb[V]) (res V) {
 	shard := m.GetShard(key)
 	shard.Lock()
 	v, ok := shard.Get(key)
 	res = cb(ok, v, value)
-	shard.Set(key, res)
+	shard.Set(key, res, expire)
 	shard.Unlock()
 	return res
 }
 
 // Sets the given value under the specified key if no value was associated with it.
 func (m LRUCache[K, V]) SetIfAbsent(key K, value V) bool {
+	return m.SetIfAbsentWithExpire(key, value, 0)
+}
+
+func (m LRUCache[K, V]) SetIfAbsentWithExpire(key K, value V, expire time.Duration) bool {
 	// Get map shard.
 	shard := m.GetShard(key)
 	shard.Lock()
 	_, ok := shard.Get(key)
 	if !ok {
-		shard.Set(key, value)
+		shard.Set(key, value, expire)
 	}
 	shard.Unlock()
 	return !ok
@@ -251,7 +298,11 @@ func snapshot[K comparable, V any](m LRUCache[K, V]) (chans []chan Tuple[K, V]) 
 			shard.RLock()
 			chans[index] = make(chan Tuple[K, V], len(shard.items))
 			wg.Done()
-			for key, val := range shard.items {
+			for key, n := range shard.items {
+				var val V
+				if n != nil {
+					val = n.Val()
+				}
 				chans[index] <- Tuple[K, V]{key, val}
 			}
 			shard.RUnlock()
@@ -302,7 +353,11 @@ func (m LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
 	for idx := range m.shards {
 		shard := (m.shards)[idx]
 		shard.RLock()
-		for key, value := range shard.items {
+		for key, n := range shard.items {
+			var value V
+			if n != nil {
+				value = n.Val()
+			}
 			fn(key, value)
 		}
 		shard.RUnlock()
