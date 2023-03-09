@@ -1,4 +1,4 @@
-package cmap
+package golru
 
 import (
 	"encoding/json"
@@ -15,63 +15,76 @@ type Stringer interface {
 
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (SHARD_COUNT) map shards.
-type ConcurrentMap[K comparable, V any] struct {
-	shards   []*ConcurrentMapShared[K, V]
+type LRUCache[K comparable, V any] struct {
+	shards   []*LRUCacheShard[K, V]
 	sharding func(key K) uint32
 }
 
 // A "thread" safe string to anything map.
-type ConcurrentMapShared[K comparable, V any] struct {
+type LRUCacheShard[K comparable, V any] struct {
 	items        map[K]V
 	sync.RWMutex // Read Write mutex, guards access to internal map.
 }
 
-func create[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V] {
-	m := ConcurrentMap[K, V]{
+func (m *LRUCacheShard[K, V]) Delete(key K) {
+	delete(m.items, key)
+}
+
+func (m *LRUCacheShard[K, V]) Set(key K, value V) {
+	m.items[key] = value
+}
+
+func (m *LRUCacheShard[K, V]) Get(key K) (V, bool) {
+	v, ok := m.items[key]
+	return v, ok
+}
+
+func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
+	m := LRUCache[K, V]{
 		sharding: sharding,
-		shards:   make([]*ConcurrentMapShared[K, V], SHARD_COUNT),
+		shards:   make([]*LRUCacheShard[K, V], SHARD_COUNT),
 	}
 	for i := 0; i < SHARD_COUNT; i++ {
-		m.shards[i] = &ConcurrentMapShared[K, V]{items: make(map[K]V)}
+		m.shards[i] = &LRUCacheShard[K, V]{items: make(map[K]V)}
 	}
 	return m
 }
 
 // Creates a new concurrent map.
-func New[V any]() ConcurrentMap[string, V] {
+func New[V any]() LRUCache[string, V] {
 	return create[string, V](fnv32)
 }
 
 // Creates a new concurrent map.
-func NewStringer[K Stringer, V any]() ConcurrentMap[K, V] {
+func NewStringer[K Stringer, V any]() LRUCache[K, V] {
 	return create[K, V](strfnv32[K])
 }
 
 // Creates a new concurrent map.
-func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V] {
+func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
 	return create[K, V](sharding)
 }
 
 // GetShard returns shard under given key
-func (m ConcurrentMap[K, V]) GetShard(key K) *ConcurrentMapShared[K, V] {
+func (m LRUCache[K, V]) GetShard(key K) *LRUCacheShard[K, V] {
 	return m.shards[uint(m.sharding(key))%uint(SHARD_COUNT)]
 }
 
-func (m ConcurrentMap[K, V]) MSet(data map[K]V) {
+func (m LRUCache[K, V]) MSet(data map[K]V) {
 	for key, value := range data {
 		shard := m.GetShard(key)
 		shard.Lock()
-		shard.items[key] = value
+		shard.Set(key, value)
 		shard.Unlock()
 	}
 }
 
 // Sets the given value under the specified key.
-func (m ConcurrentMap[K, V]) Set(key K, value V) {
+func (m LRUCache[K, V]) Set(key K, value V) {
 	// Get map shard.
 	shard := m.GetShard(key)
 	shard.Lock()
-	shard.items[key] = value
+	shard.Set(key, value)
 	shard.Unlock()
 }
 
@@ -82,42 +95,42 @@ func (m ConcurrentMap[K, V]) Set(key K, value V) {
 type UpsertCb[V any] func(exist bool, valueInMap V, newValue V) V
 
 // Insert or Update - updates existing element or inserts a new one using UpsertCb
-func (m ConcurrentMap[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
+func (m LRUCache[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
 	shard := m.GetShard(key)
 	shard.Lock()
-	v, ok := shard.items[key]
+	v, ok := shard.Get(key)
 	res = cb(ok, v, value)
-	shard.items[key] = res
+	shard.Set(key, res)
 	shard.Unlock()
 	return res
 }
 
 // Sets the given value under the specified key if no value was associated with it.
-func (m ConcurrentMap[K, V]) SetIfAbsent(key K, value V) bool {
+func (m LRUCache[K, V]) SetIfAbsent(key K, value V) bool {
 	// Get map shard.
 	shard := m.GetShard(key)
 	shard.Lock()
-	_, ok := shard.items[key]
+	_, ok := shard.Get(key)
 	if !ok {
-		shard.items[key] = value
+		shard.Set(key, value)
 	}
 	shard.Unlock()
 	return !ok
 }
 
 // Get retrieves an element from map under given key.
-func (m ConcurrentMap[K, V]) Get(key K) (V, bool) {
+func (m LRUCache[K, V]) Get(key K) (V, bool) {
 	// Get shard
 	shard := m.GetShard(key)
 	shard.RLock()
 	// Get item from shard.
-	val, ok := shard.items[key]
+	val, ok := shard.Get(key)
 	shard.RUnlock()
 	return val, ok
 }
 
 // Count returns the number of elements within the map.
-func (m ConcurrentMap[K, V]) Count() int {
+func (m LRUCache[K, V]) Count() int {
 	count := 0
 	for i := 0; i < SHARD_COUNT; i++ {
 		shard := m.shards[i]
@@ -129,22 +142,22 @@ func (m ConcurrentMap[K, V]) Count() int {
 }
 
 // Looks up an item under specified key
-func (m ConcurrentMap[K, V]) Has(key K) bool {
+func (m LRUCache[K, V]) Has(key K) bool {
 	// Get shard
 	shard := m.GetShard(key)
 	shard.RLock()
 	// See if element is within shard.
-	_, ok := shard.items[key]
+	_, ok := shard.Get(key)
 	shard.RUnlock()
 	return ok
 }
 
 // Remove removes an element from the map.
-func (m ConcurrentMap[K, V]) Remove(key K) {
+func (m LRUCache[K, V]) Remove(key K) {
 	// Try to get shard.
 	shard := m.GetShard(key)
 	shard.Lock()
-	delete(shard.items, key)
+	shard.Delete(key)
 	shard.Unlock()
 }
 
@@ -155,32 +168,32 @@ type RemoveCb[K any, V any] func(key K, v V, exists bool) bool
 // RemoveCb locks the shard containing the key, retrieves its current value and calls the callback with those params
 // If callback returns true and element exists, it will remove it from the map
 // Returns the value returned by the callback (even if element was not present in the map)
-func (m ConcurrentMap[K, V]) RemoveCb(key K, cb RemoveCb[K, V]) bool {
+func (m LRUCache[K, V]) RemoveCb(key K, cb RemoveCb[K, V]) bool {
 	// Try to get shard.
 	shard := m.GetShard(key)
 	shard.Lock()
-	v, ok := shard.items[key]
+	v, ok := shard.Get(key)
 	remove := cb(key, v, ok)
 	if remove && ok {
-		delete(shard.items, key)
+		shard.Delete(key)
 	}
 	shard.Unlock()
 	return remove
 }
 
 // Pop removes an element from the map and returns it
-func (m ConcurrentMap[K, V]) Pop(key K) (v V, exists bool) {
+func (m LRUCache[K, V]) Pop(key K) (v V, exists bool) {
 	// Try to get shard.
 	shard := m.GetShard(key)
 	shard.Lock()
-	v, exists = shard.items[key]
-	delete(shard.items, key)
+	v, exists = shard.Get(key)
+	shard.Delete(key)
 	shard.Unlock()
 	return v, exists
 }
 
 // IsEmpty checks if map is empty.
-func (m ConcurrentMap[K, V]) IsEmpty() bool {
+func (m LRUCache[K, V]) IsEmpty() bool {
 	return m.Count() == 0
 }
 
@@ -193,7 +206,7 @@ type Tuple[K comparable, V any] struct {
 // Iter returns an iterator which could be used in a for range loop.
 //
 // Deprecated: using IterBuffered() will get a better performence
-func (m ConcurrentMap[K, V]) Iter() <-chan Tuple[K, V] {
+func (m LRUCache[K, V]) Iter() <-chan Tuple[K, V] {
 	chans := snapshot(m)
 	ch := make(chan Tuple[K, V])
 	go fanIn(chans, ch)
@@ -201,7 +214,7 @@ func (m ConcurrentMap[K, V]) Iter() <-chan Tuple[K, V] {
 }
 
 // IterBuffered returns a buffered iterator which could be used in a for range loop.
-func (m ConcurrentMap[K, V]) IterBuffered() <-chan Tuple[K, V] {
+func (m LRUCache[K, V]) IterBuffered() <-chan Tuple[K, V] {
 	chans := snapshot(m)
 	total := 0
 	for _, c := range chans {
@@ -213,7 +226,7 @@ func (m ConcurrentMap[K, V]) IterBuffered() <-chan Tuple[K, V] {
 }
 
 // Clear removes all items from map.
-func (m ConcurrentMap[K, V]) Clear() {
+func (m LRUCache[K, V]) Clear() {
 	for item := range m.IterBuffered() {
 		m.Remove(item.Key)
 	}
@@ -223,17 +236,17 @@ func (m ConcurrentMap[K, V]) Clear() {
 // which likely takes a snapshot of `m`.
 // It returns once the size of each buffered channel is determined,
 // before all the channels are populated using goroutines.
-func snapshot[K comparable, V any](m ConcurrentMap[K, V]) (chans []chan Tuple[K, V]) {
+func snapshot[K comparable, V any](m LRUCache[K, V]) (chans []chan Tuple[K, V]) {
 	//When you access map items before initializing.
 	if len(m.shards) == 0 {
-		panic(`cmap.ConcurrentMap is not initialized. Should run New() before usage.`)
+		panic(`cmap.LRUCache is not initialized. Should run New() before usage.`)
 	}
 	chans = make([]chan Tuple[K, V], SHARD_COUNT)
 	wg := sync.WaitGroup{}
 	wg.Add(SHARD_COUNT)
 	// Foreach shard.
 	for index, shard := range m.shards {
-		go func(index int, shard *ConcurrentMapShared[K, V]) {
+		go func(index int, shard *LRUCacheShard[K, V]) {
 			// Foreach key, value pair.
 			shard.RLock()
 			chans[index] = make(chan Tuple[K, V], len(shard.items))
@@ -266,7 +279,7 @@ func fanIn[K comparable, V any](chans []chan Tuple[K, V], out chan Tuple[K, V]) 
 }
 
 // Items returns all items as map[string]V
-func (m ConcurrentMap[K, V]) Items() map[K]V {
+func (m LRUCache[K, V]) Items() map[K]V {
 	tmp := make(map[K]V)
 
 	// Insert items to temporary map.
@@ -285,7 +298,7 @@ type IterCb[K comparable, V any] func(key K, v V)
 
 // Callback based iterator, cheapest way to read
 // all elements in a map.
-func (m ConcurrentMap[K, V]) IterCb(fn IterCb[K, V]) {
+func (m LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
 	for idx := range m.shards {
 		shard := (m.shards)[idx]
 		shard.RLock()
@@ -297,7 +310,7 @@ func (m ConcurrentMap[K, V]) IterCb(fn IterCb[K, V]) {
 }
 
 // Keys returns all keys as []string
-func (m ConcurrentMap[K, V]) Keys() []K {
+func (m LRUCache[K, V]) Keys() []K {
 	count := m.Count()
 	ch := make(chan K, count)
 	go func() {
@@ -305,7 +318,7 @@ func (m ConcurrentMap[K, V]) Keys() []K {
 		wg := sync.WaitGroup{}
 		wg.Add(SHARD_COUNT)
 		for _, shard := range m.shards {
-			go func(shard *ConcurrentMapShared[K, V]) {
+			go func(shard *LRUCacheShard[K, V]) {
 				// Foreach key, value pair.
 				shard.RLock()
 				for key := range shard.items {
@@ -327,8 +340,8 @@ func (m ConcurrentMap[K, V]) Keys() []K {
 	return keys
 }
 
-// Reviles ConcurrentMap "private" variables to json marshal.
-func (m ConcurrentMap[K, V]) MarshalJSON() ([]byte, error) {
+// Reviles LRUCache "private" variables to json marshal.
+func (m LRUCache[K, V]) MarshalJSON() ([]byte, error) {
 	// Create a temporary map, which will hold all item spread across shards.
 	tmp := make(map[K]V)
 
@@ -354,7 +367,7 @@ func fnv32(key string) uint32 {
 }
 
 // Reverse process of Marshal.
-func (m *ConcurrentMap[K, V]) UnmarshalJSON(b []byte) (err error) {
+func (m *LRUCache[K, V]) UnmarshalJSON(b []byte) (err error) {
 	tmp := make(map[K]V)
 
 	// Unmarshal into a single map.
