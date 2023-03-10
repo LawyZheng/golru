@@ -2,10 +2,13 @@ package golru
 
 import (
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
 )
 
 type Animal struct {
@@ -640,4 +643,83 @@ func TestUnDrainedIterBuffered(t *testing.T) {
 	if counter != 200 {
 		t.Error("We should have counted 200 elements.")
 	}
+}
+
+func TestLRUCacheExpire(t *testing.T) {
+	m := New[Animal]()
+	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
+
+	if _, ok := m.Get("monkey"); !ok {
+		t.Error("expecting to get true, but got false")
+		return
+	}
+
+	time.Sleep(time.Second)
+	if _, ok := m.Get("monkey"); ok {
+		t.Error("expecting to get false, but got true")
+		return
+	}
+
+}
+
+func TestLRUCacheNodeMove(t *testing.T) {
+	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint32 {
+		return 0
+	})
+	m.capacity = 1
+	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
+	m.SetWithExpire("dog", Animal{name: "dog"}, time.Second)
+	m.SetWithExpire("pig", Animal{name: "pig"}, time.Second)
+	//m.Set("monkey", Animal{name: "monkey"})
+	//m.Set("dog", Animal{name: "dog"})
+	//m.Set("pig", Animal{name: "pig"})
+	fmt.Println(m.shards[0].linkedList.String())
+
+	fmt.Println(m.Get("dog"))
+	fmt.Println(m.Get("pig"))
+	time.Sleep(time.Second)
+	fmt.Println(m.Get("pig"))
+
+	m.Set("pig", Animal{name: "pignew"})
+	fmt.Println(m.Get("dog"))
+	fmt.Println(m.Get("pig"))
+	fmt.Println(m.shards[0].linkedList.String())
+
+	//m.Remove("pig")
+
+	fmt.Println("size: ", m.size)
+	fmt.Println("count: ", m.Count())
+}
+
+func TestLRUSufficient(t *testing.T) {
+	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint32 {
+		i, _ := strconv.Atoi(key)
+		return uint32(i % SHARD_COUNT)
+	})
+	m.SetCapacity(32)
+
+	for i := 0; i < SHARD_COUNT; i++ {
+		m.Set(strconv.Itoa(i), Animal{name: strconv.Itoa(i)})
+	}
+
+	m.Get("29")
+
+	var wg sync.WaitGroup
+	for i := 1; i < SHARD_COUNT; i++ {
+		wg.Add(1)
+		num := i * SHARD_COUNT
+		go func(num int) {
+			defer wg.Done()
+			m.Set(strconv.Itoa(num), Animal{name: strconv.Itoa(num)})
+		}(num)
+	}
+	wg.Wait()
+
+	for _, shard := range m.shards {
+		fmt.Println(shard.linkedList.String())
+	}
+
+	fmt.Println("size: ", m.size)
+	fmt.Println("count: ", m.Count())
+
 }

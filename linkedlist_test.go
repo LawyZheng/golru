@@ -14,14 +14,14 @@ func Test_newNode(t *testing.T) {
 	type testCase[T any] struct {
 		name string
 		args args[T]
-		want *node[T]
+		want *node[string, T]
 	}
 	tests := []testCase[string]{
 		// TODO: Add test cases.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := newNode(tt.args.val, 0); !reflect.DeepEqual(got, tt.want) {
+			if got := newNode("", tt.args.val, 0); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("newNode() = %v, want %v", got, tt.want)
 			}
 		})
@@ -63,14 +63,14 @@ func TestNode_CutOff_Concurrent(t *testing.T) {
 	fmt.Println(tail.ReadBackward(nil))
 }
 
-func createChainByNode(length int) (head, tail *node[int], list []*node[int]) {
+func createChainByNode(length int) (head, tail *node[string, int], list []*node[string, int]) {
 	if length == 0 {
 		return nil, nil, nil
 	}
 
-	list = make([]*node[int], length)
+	list = make([]*node[string, int], length)
 	for i := 0; i < length; i++ {
-		list[i] = newNode(i, 0)
+		list[i] = newNode("", i, 0)
 		if i > 0 && i < length {
 			list[i-1].SetNext(list[i])
 			list[i].SetPre(list[i-1])
@@ -80,11 +80,17 @@ func createChainByNode(length int) (head, tail *node[int], list []*node[int]) {
 }
 
 func TestDoubleLinkedList_Append(t *testing.T) {
-	list := newDoubleLinkedList[int]()
-	list.Append(newNode(1, 0))
-	list.Prepend(newNode(11, 0))
-	list.Append(newNode(2, 0))
-	list.Prepend(newNode(22, 0))
-	list.Append(newNode(3, 0))
+	list := newDoubleLinkedList[string, int]()
+	list.Append(newNode("", 1, 0))
+	list.Prepend(newNode("", 11, 0))
+	list.Append(newNode("", 2, 0))
+	list.Prepend(newNode("", 22, 0))
+	list.Append(newNode("", 3, 0))
+	fmt.Println(list.Head().ReadForward(list.dummyTail))
+	n := list.Pop()
+	for n != nil {
+		fmt.Println(n.Val())
+		n = list.Pop()
+	}
 	fmt.Println(list.Head().ReadForward(list.dummyTail))
 }

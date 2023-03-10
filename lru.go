@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,54 +20,22 @@ type Stringer interface {
 type LRUCache[K comparable, V any] struct {
 	shards   []*LRUCacheShard[K, V]
 	sharding func(key K) uint32
+
+	capacity uint64
+	size     uint64
 }
 
 // A "thread" safe string to anything map.
 type LRUCacheShard[K comparable, V any] struct {
-	items        map[K]*node[V]
-	linkedList   *doubleLinkedList[V]
+	items        map[K]*node[K, V]
+	linkedList   *doubleLinkedList[K, V]
 	sync.RWMutex // Read Write mutex, guards access to internal map.
-}
-
-func (m *LRUCacheShard[K, V]) Delete(key K) {
-	n, ok := m.items[key]
-	if ok {
-		n.CutOff()
-	}
-
-	delete(m.items, key)
-}
-
-func (m *LRUCacheShard[K, V]) Set(key K, value V, expire time.Duration) {
-	var n *node[V]
-	var ok bool
-	n, ok = m.items[key]
-	if !ok {
-		n = newNode(value, expire)
-	} else {
-		n.CutOff()
-		n.SetValWithExpire(value, expire)
-	}
-
-	m.items[key] = n
-	m.linkedList.Prepend(n)
-}
-
-func (m *LRUCacheShard[K, V]) Get(key K) (V, bool) {
-	n, ok := m.items[key]
-	var value V
-	if ok = ok && !n.IsExpire(); ok {
-		value = n.Val()
-		n.CutOff()
-		m.linkedList.Prepend(n)
-	}
-	return value, ok
 }
 
 func createShard[K comparable, V any]() *LRUCacheShard[K, V] {
 	return &LRUCacheShard[K, V]{
-		items:      make(map[K]*node[V]),
-		linkedList: newDoubleLinkedList[V](),
+		items:      make(map[K]*node[K, V]),
+		linkedList: newDoubleLinkedList[K, V](),
 	}
 }
 
@@ -96,35 +65,180 @@ func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uin
 	return create[K, V](sharding)
 }
 
-// GetShard returns shard under given key
-func (m LRUCache[K, V]) GetShard(key K) *LRUCacheShard[K, V] {
-	return m.shards[uint(m.sharding(key))%uint(SHARD_COUNT)]
+type setCallBack[V any] func(exist bool, valueInMap V, newValue V) (res V, stop bool)
+
+func (m *LRUCache[K, V]) get(index uint, key K, update bool) (V, bool) {
+	// Get map shard.
+	shard := m.shards[index]
+
+	if update {
+		shard.Lock()
+		defer shard.Unlock()
+	} else {
+		shard.RLock()
+		defer shard.RUnlock()
+	}
+
+	n, ok := shard.items[key]
+	var value V
+	if ok = ok && !n.IsExpire(); ok {
+		if update {
+			n.lock.Lock()
+			defer n.lock.Unlock()
+			n.lastAccess = time.Now()
+			n.CutOff()
+			shard.linkedList.Prepend(n)
+		} else {
+			n.lock.RLock()
+			defer n.lock.RUnlock()
+		}
+
+		value = n.val
+	}
+	return value, ok
 }
 
-func (m LRUCache[K, V]) MSet(data map[K]V) {
+func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, cb setCallBack[V]) V {
+	// Get map shard.
+	shard := m.shards[index]
+	shard.Lock()
+	defer shard.Unlock()
+
+	var (
+		delta int64
+		n     *node[K, V]
+		ok    bool
+	)
+
+	n, ok = shard.items[key]
+	if cb != nil {
+		var (
+			vInMap V
+		)
+		if n != nil {
+			vInMap = n.Val()
+		}
+		res, stopped := cb(ok, vInMap, value)
+		if stopped {
+			return value
+		}
+		value = res
+	}
+
+	if !ok {
+		if m.capacity == 0 || atomic.LoadUint64(&m.size) < m.capacity {
+			delta = 1
+		} else {
+			handlerShard := shard
+			for i := 0; i < SHARD_COUNT; i++ {
+				// skip the original shard
+				if uint(i) == index {
+					continue
+				}
+
+				curShard := m.shards[i]
+				if handlerShard.linkedList.Tail() == nil {
+					// original shard has been locked yet
+					if handlerShard != shard {
+						handlerShard.Unlock()
+					}
+					curShard.Lock()
+					handlerShard = curShard
+					continue
+				}
+
+				if !handlerShard.linkedList.Tail().Before(curShard.linkedList.Tail()) {
+					// original shard has been locked yet
+					if handlerShard != shard {
+						handlerShard.Unlock()
+					}
+					curShard.Lock()
+
+					handlerShard = curShard
+				}
+			}
+
+			popV := handlerShard.linkedList.Pop()
+			delete(handlerShard.items, popV.Key())
+
+			if handlerShard != shard {
+				handlerShard.Unlock()
+			}
+
+		}
+		n = newNode(key, value, expire)
+	} else {
+		n.CutOff()
+		n.SetValWithExpire(value, expire)
+	}
+
+	shard.items[key] = n
+	shard.linkedList.Prepend(n)
+	atomic.AddUint64(&m.size, uint64(delta))
+
+	return value
+}
+
+func (m *LRUCache[K, V]) delete(index uint, key K, cb RemoveCb[K, V]) (V, bool) {
+	// Get map shard.
+	shard := m.shards[index]
+	shard.Lock()
+	defer shard.Unlock()
+
+	var (
+		delta  int64
+		remove = true
+		value  V
+	)
+	n, ok := shard.items[key]
+	if n != nil {
+		value = n.Val()
+	}
+	if cb != nil {
+		remove = cb(key, value, ok)
+	}
+
+	if remove && ok {
+		delta = -1
+		n.CutOff()
+		delete(shard.items, key)
+	}
+
+	atomic.AddUint64(&m.size, uint64(delta))
+	return value, remove
+}
+
+func (m *LRUCache[K, V]) getShardIndex(key K) uint {
+	return uint(m.sharding(key)) % uint(SHARD_COUNT)
+}
+
+func (m *LRUCache[K, V]) SetCapacity(capacity uint64) *LRUCache[K, V] {
+	m.capacity = capacity
+	return m
+}
+
+// GetShard returns shard under given key
+func (m *LRUCache[K, V]) GetShard(key K) *LRUCacheShard[K, V] {
+	return m.shards[m.getShardIndex(key)]
+}
+
+func (m *LRUCache[K, V]) MSet(data map[K]V) {
 	m.MSetWithExpire(data, 0)
 }
 
-func (m LRUCache[K, V]) MSetWithExpire(data map[K]V, expire time.Duration) {
+func (m *LRUCache[K, V]) MSetWithExpire(data map[K]V, expire time.Duration) {
 	for key, value := range data {
-		shard := m.GetShard(key)
-		shard.Lock()
-		shard.Set(key, value, expire)
-		shard.Unlock()
+		m.set(m.getShardIndex(key), key, value, expire, nil)
 	}
 }
 
 // Sets the given value under the specified key.
-func (m LRUCache[K, V]) Set(key K, value V) {
+func (m *LRUCache[K, V]) Set(key K, value V) {
 	m.SetWithExpire(key, value, 0)
 }
 
-func (m LRUCache[K, V]) SetWithExpire(key K, value V, expire time.Duration) {
-	// Get map shard.
-	shard := m.GetShard(key)
-	shard.Lock()
-	shard.Set(key, value, expire)
-	shard.Unlock()
+func (m *LRUCache[K, V]) SetWithExpire(key K, value V, expire time.Duration) {
+	m.set(m.getShardIndex(key), key, value, expire, nil)
 }
 
 // Callback to return new element to be inserted into the map
@@ -134,50 +248,43 @@ func (m LRUCache[K, V]) SetWithExpire(key K, value V, expire time.Duration) {
 type UpsertCb[V any] func(exist bool, valueInMap V, newValue V) V
 
 // Insert or Update - updates existing element or inserts a new one using UpsertCb
-func (m LRUCache[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
+func (m *LRUCache[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
 	return m.UpsertWithExpire(key, value, 0, cb)
 }
 
-func (m LRUCache[K, V]) UpsertWithExpire(key K, value V, expire time.Duration, cb UpsertCb[V]) (res V) {
-	shard := m.GetShard(key)
-	shard.Lock()
-	v, ok := shard.Get(key)
-	res = cb(ok, v, value)
-	shard.Set(key, res, expire)
-	shard.Unlock()
-	return res
+func (m *LRUCache[K, V]) UpsertWithExpire(key K, value V, expire time.Duration, cb UpsertCb[V]) (res V) {
+	callback := func(exist bool, valueInMap V, newValue V) (res V, stop bool) {
+		return cb(exist, valueInMap, newValue), false
+	}
+	return m.set(m.getShardIndex(key), key, value, expire, callback)
 }
 
 // Sets the given value under the specified key if no value was associated with it.
-func (m LRUCache[K, V]) SetIfAbsent(key K, value V) bool {
+func (m *LRUCache[K, V]) SetIfAbsent(key K, value V) bool {
 	return m.SetIfAbsentWithExpire(key, value, 0)
 }
 
-func (m LRUCache[K, V]) SetIfAbsentWithExpire(key K, value V, expire time.Duration) bool {
-	// Get map shard.
-	shard := m.GetShard(key)
-	shard.Lock()
-	_, ok := shard.Get(key)
-	if !ok {
-		shard.Set(key, value, expire)
+func (m *LRUCache[K, V]) SetIfAbsentWithExpire(key K, value V, expire time.Duration) bool {
+	var ok bool
+	callback := func(exist bool, valueInMap V, newValue V) (res V, stop bool) {
+		ok = !exist
+		return newValue, exist
 	}
-	shard.Unlock()
-	return !ok
+	m.set(m.getShardIndex(key), key, value, expire, callback)
+	return ok
 }
 
 // Get retrieves an element from map under given key.
-func (m LRUCache[K, V]) Get(key K) (V, bool) {
-	// Get shard
-	shard := m.GetShard(key)
-	shard.RLock()
-	// Get item from shard.
-	val, ok := shard.Get(key)
-	shard.RUnlock()
-	return val, ok
+func (m *LRUCache[K, V]) Get(key K) (V, bool) {
+	return m.get(m.getShardIndex(key), key, true)
+}
+
+func (m *LRUCache[K, V]) Size() uint64 {
+	return m.size
 }
 
 // Count returns the number of elements within the map.
-func (m LRUCache[K, V]) Count() int {
+func (m *LRUCache[K, V]) Count() int {
 	count := 0
 	for i := 0; i < SHARD_COUNT; i++ {
 		shard := m.shards[i]
@@ -189,58 +296,40 @@ func (m LRUCache[K, V]) Count() int {
 }
 
 // Looks up an item under specified key
-func (m LRUCache[K, V]) Has(key K) bool {
-	// Get shard
-	shard := m.GetShard(key)
-	shard.RLock()
-	// See if element is within shard.
-	_, ok := shard.Get(key)
-	shard.RUnlock()
+func (m *LRUCache[K, V]) Has(key K) bool {
+	_, ok := m.get(m.getShardIndex(key), key, false)
 	return ok
 }
 
 // Remove removes an element from the map.
-func (m LRUCache[K, V]) Remove(key K) {
-	// Try to get shard.
-	shard := m.GetShard(key)
-	shard.Lock()
-	shard.Delete(key)
-	shard.Unlock()
+func (m *LRUCache[K, V]) Remove(key K) {
+	m.delete(m.getShardIndex(key), key, nil)
 }
 
 // RemoveCb is a callback executed in a map.RemoveCb() call, while Lock is held
 // If returns true, the element will be removed from the map
-type RemoveCb[K any, V any] func(key K, v V, exists bool) bool
+type RemoveCb[K any, V any] func(key K, v V, exists bool) (remove bool)
 
 // RemoveCb locks the shard containing the key, retrieves its current value and calls the callback with those params
 // If callback returns true and element exists, it will remove it from the map
 // Returns the value returned by the callback (even if element was not present in the map)
-func (m LRUCache[K, V]) RemoveCb(key K, cb RemoveCb[K, V]) bool {
-	// Try to get shard.
-	shard := m.GetShard(key)
-	shard.Lock()
-	v, ok := shard.Get(key)
-	remove := cb(key, v, ok)
-	if remove && ok {
-		shard.Delete(key)
-	}
-	shard.Unlock()
+func (m *LRUCache[K, V]) RemoveCb(key K, cb RemoveCb[K, V]) bool {
+	_, remove := m.delete(m.getShardIndex(key), key, cb)
 	return remove
 }
 
 // Pop removes an element from the map and returns it
-func (m LRUCache[K, V]) Pop(key K) (v V, exists bool) {
-	// Try to get shard.
-	shard := m.GetShard(key)
-	shard.Lock()
-	v, exists = shard.Get(key)
-	shard.Delete(key)
-	shard.Unlock()
+func (m *LRUCache[K, V]) Pop(key K) (v V, exists bool) {
+	callback := func(key K, v V, exist bool) bool {
+		exists = exist
+		return true
+	}
+	v, _ = m.delete(m.getShardIndex(key), key, callback)
 	return v, exists
 }
 
 // IsEmpty checks if map is empty.
-func (m LRUCache[K, V]) IsEmpty() bool {
+func (m *LRUCache[K, V]) IsEmpty() bool {
 	return m.Count() == 0
 }
 
@@ -253,7 +342,7 @@ type Tuple[K comparable, V any] struct {
 // Iter returns an iterator which could be used in a for range loop.
 //
 // Deprecated: using IterBuffered() will get a better performence
-func (m LRUCache[K, V]) Iter() <-chan Tuple[K, V] {
+func (m *LRUCache[K, V]) Iter() <-chan Tuple[K, V] {
 	chans := snapshot(m)
 	ch := make(chan Tuple[K, V])
 	go fanIn(chans, ch)
@@ -261,7 +350,7 @@ func (m LRUCache[K, V]) Iter() <-chan Tuple[K, V] {
 }
 
 // IterBuffered returns a buffered iterator which could be used in a for range loop.
-func (m LRUCache[K, V]) IterBuffered() <-chan Tuple[K, V] {
+func (m *LRUCache[K, V]) IterBuffered() <-chan Tuple[K, V] {
 	chans := snapshot(m)
 	total := 0
 	for _, c := range chans {
@@ -273,7 +362,7 @@ func (m LRUCache[K, V]) IterBuffered() <-chan Tuple[K, V] {
 }
 
 // Clear removes all items from map.
-func (m LRUCache[K, V]) Clear() {
+func (m *LRUCache[K, V]) Clear() {
 	for item := range m.IterBuffered() {
 		m.Remove(item.Key)
 	}
@@ -283,7 +372,7 @@ func (m LRUCache[K, V]) Clear() {
 // which likely takes a snapshot of `m`.
 // It returns once the size of each buffered channel is determined,
 // before all the channels are populated using goroutines.
-func snapshot[K comparable, V any](m LRUCache[K, V]) (chans []chan Tuple[K, V]) {
+func snapshot[K comparable, V any](m *LRUCache[K, V]) (chans []chan Tuple[K, V]) {
 	//When you access map items before initializing.
 	if len(m.shards) == 0 {
 		panic(`cmap.LRUCache is not initialized. Should run New() before usage.`)
