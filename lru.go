@@ -127,35 +127,33 @@ func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, c
 
 	if !ok {
 		if m.capacity == 0 || atomic.LoadUint64(&m.size) < m.capacity {
+			// capacity is insufficient, add the node directly
 			delta = 1
 		} else {
+			// capacity is full, delete the most remote node according to LRU rule
 			handlerShard := shard
+
+			swapShard := func(old *LRUCacheShard[K, V], new *LRUCacheShard[K, V]) *LRUCacheShard[K, V] {
+				if old.linkedList.Tail() != nil &&
+					old.linkedList.Tail().Before(new.linkedList.Tail()) {
+					return old
+				}
+
+				// swapping
+				// original shard has been locked yet
+				if old != shard {
+					old.Unlock()
+				}
+				new.Lock()
+				return new
+			}
+
 			for i := 0; i < SHARD_COUNT; i++ {
 				// skip the original shard
 				if uint(i) == index {
 					continue
 				}
-
-				curShard := m.shards[i]
-				if handlerShard.linkedList.Tail() == nil {
-					// original shard has been locked yet
-					if handlerShard != shard {
-						handlerShard.Unlock()
-					}
-					curShard.Lock()
-					handlerShard = curShard
-					continue
-				}
-
-				if !handlerShard.linkedList.Tail().Before(curShard.linkedList.Tail()) {
-					// original shard has been locked yet
-					if handlerShard != shard {
-						handlerShard.Unlock()
-					}
-					curShard.Lock()
-
-					handlerShard = curShard
-				}
+				handlerShard = swapShard(handlerShard, m.shards[i])
 			}
 
 			popV := handlerShard.linkedList.Pop()
