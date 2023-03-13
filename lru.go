@@ -374,8 +374,10 @@ func (m *LRUCache[K, V]) IterBuffered() <-chan Tuple[K, V] {
 
 // Clear removes all items from map.
 func (m *LRUCache[K, V]) Clear() {
-	for item := range m.IterBuffered() {
-		m.Remove(item.Key)
+	for i := 0; i < SHARD_COUNT; i++ {
+		for k := range m.shards[i].items {
+			m.Remove(k)
+		}
 	}
 }
 
@@ -383,12 +385,12 @@ func (m *LRUCache[K, V]) Clear() {
 // which likely takes a snapshot of `m`.
 // It returns once the size of each buffered channel is determined,
 // before all the channels are populated using goroutines.
-func snapshot[K comparable, V any](m *LRUCache[K, V]) (chans []chan Tuple[K, V]) {
+func snapshot[K comparable, V any](m *LRUCache[K, V]) (chans []chan *node[K, V]) {
 	//When you access map items before initializing.
 	if len(m.shards) == 0 {
 		panic(`cmap.LRUCache is not initialized. Should run New() before usage.`)
 	}
-	chans = make([]chan Tuple[K, V], SHARD_COUNT)
+	chans = make([]chan *node[K, V], SHARD_COUNT)
 	wg := sync.WaitGroup{}
 	wg.Add(SHARD_COUNT)
 	// Foreach shard.
@@ -396,14 +398,10 @@ func snapshot[K comparable, V any](m *LRUCache[K, V]) (chans []chan Tuple[K, V])
 		go func(index int, shard *LRUCacheShard[K, V]) {
 			// Foreach key, value pair.
 			shard.RLock()
-			chans[index] = make(chan Tuple[K, V], len(shard.items))
+			chans[index] = make(chan *node[K, V], len(shard.items))
 			wg.Done()
-			for key, n := range shard.items {
-				var val V
-				if n != nil {
-					val = n.Val()
-				}
-				chans[index] <- Tuple[K, V]{key, val}
+			for _, n := range shard.items {
+				chans[index] <- n
 			}
 			shard.RUnlock()
 			close(chans[index])
@@ -414,13 +412,19 @@ func snapshot[K comparable, V any](m *LRUCache[K, V]) (chans []chan Tuple[K, V])
 }
 
 // fanIn reads elements from channels `chans` into channel `out`
-func fanIn[K comparable, V any](chans []chan Tuple[K, V], out chan Tuple[K, V]) {
+func fanIn[K comparable, V any](chans []chan *node[K, V], out chan Tuple[K, V]) {
 	wg := sync.WaitGroup{}
 	wg.Add(len(chans))
 	for _, ch := range chans {
-		go func(ch chan Tuple[K, V]) {
+		go func(ch chan *node[K, V]) {
 			for t := range ch {
-				out <- t
+				if t == nil {
+					continue
+				}
+				if t.IsExpire() {
+					continue
+				}
+				out <- Tuple[K, V]{t.Key(), t.Val()}
 			}
 			wg.Done()
 		}(ch)
@@ -450,18 +454,30 @@ type IterCb[K comparable, V any] func(key K, v V)
 // Callback based iterator, cheapest way to read
 // all elements in a map.
 func (m LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
-	for idx := range m.shards {
-		shard := (m.shards)[idx]
-		shard.RLock()
-		for key, n := range shard.items {
-			var value V
-			if n != nil {
-				value = n.Val()
-			}
-			fn(key, value)
-		}
-		shard.RUnlock()
+	for item := range m.IterBuffered() {
+		fn(item.Key, item.Val)
 	}
+
+	//for idx := range m.shards {
+	//	shard := (m.shards)[idx]
+	//	shard.RLock()
+	//	for key, n := range shard.items {
+	//		if n == nil {
+	//			continue
+	//		}
+	//
+	//		if n.IsExpire() {
+	//			continue
+	//		}
+	//
+	//		var value V
+	//		if n != nil {
+	//			value = n.Val()
+	//		}
+	//		fn(key, value)
+	//	}
+	//	shard.RUnlock()
+	//}
 }
 
 // Keys returns all keys as []string
@@ -476,7 +492,13 @@ func (m LRUCache[K, V]) Keys() []K {
 			go func(shard *LRUCacheShard[K, V]) {
 				// Foreach key, value pair.
 				shard.RLock()
-				for key := range shard.items {
+				for key, value := range shard.items {
+					if value == nil {
+						continue
+					}
+					if value.IsExpire() {
+						continue
+					}
 					ch <- key
 				}
 				shard.RUnlock()
