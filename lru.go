@@ -20,6 +20,7 @@ type Stringer interface {
 type LRUCache[K comparable, V any] struct {
 	shards   []*LRUCacheShard[K, V]
 	sharding func(key K) uint32
+	pool     sync.Pool
 
 	capacity uint64
 	size     uint64
@@ -43,6 +44,14 @@ func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
 	m := LRUCache[K, V]{
 		sharding: sharding,
 		shards:   make([]*LRUCacheShard[K, V], SHARD_COUNT),
+		pool: sync.Pool{
+			New: func() any {
+				return &node[K, V]{
+					lock:       new(sync.RWMutex),
+					lastAccess: time.Now(),
+				}
+			},
+		},
 	}
 	for i := 0; i < SHARD_COUNT; i++ {
 		m.shards[i] = createShard[K, V]()
@@ -98,6 +107,35 @@ func (m *LRUCache[K, V]) get(index uint, key K, update bool) (V, bool) {
 	return value, ok
 }
 
+func deleteOldestNodeInCache[K comparable, V any](cache *LRUCache[K, V]) *node[K, V] {
+	curShard := cache.shards[0]
+	curShard.Lock()
+	curNode := curShard.linkedList.Tail()
+
+	for i := 1; i < SHARD_COUNT; i++ {
+		cache.shards[i].Lock()
+		tmpNode := cache.shards[i].linkedList.Tail()
+		if curNode != nil && curNode.Before(tmpNode) {
+			cache.shards[i].Unlock()
+			continue
+		}
+
+		curShard.Unlock()
+		curShard = cache.shards[i]
+		curNode = tmpNode
+	}
+
+	if curNode != nil {
+		curNode.CutOff()
+		delete(curShard.items, curNode.Key())
+	}
+
+	delta := -1
+	atomic.AddUint64(&cache.size, uint64(delta))
+	curShard.Unlock()
+	return curNode
+}
+
 func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, cb setCallBack[V]) V {
 	// Get map shard.
 	shard := m.shards[index]
@@ -126,44 +164,14 @@ func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, c
 	}
 
 	if !ok {
-		if m.capacity == 0 || atomic.LoadUint64(&m.size) < m.capacity {
-			// capacity is insufficient, add the node directly
-			delta = 1
-		} else {
+		if m.capacity != 0 && atomic.LoadUint64(&m.size) >= m.capacity {
 			// capacity is full, delete the most remote node according to LRU rule
-			handlerShard := shard
-
-			swapShard := func(old *LRUCacheShard[K, V], new *LRUCacheShard[K, V]) *LRUCacheShard[K, V] {
-				if old.linkedList.Tail() != nil &&
-					old.linkedList.Tail().Before(new.linkedList.Tail()) {
-					return old
-				}
-
-				// swapping
-				// original shard has been locked yet
-				if old != shard {
-					old.Unlock()
-				}
-				new.Lock()
-				return new
-			}
-
-			for i := 0; i < SHARD_COUNT; i++ {
-				// skip the original shard
-				if uint(i) == index {
-					continue
-				}
-				handlerShard = swapShard(handlerShard, m.shards[i])
-			}
-
-			popV := handlerShard.linkedList.Pop()
-			delete(handlerShard.items, popV.Key())
-
-			if handlerShard != shard {
-				handlerShard.Unlock()
-			}
-
+			shard.Unlock()
+			deleteOldestNodeInCache(m)
+			shard.Lock()
 		}
+
+		delta = 1
 		n = newNode(key, value, expire)
 	} else {
 		n.CutOff()
