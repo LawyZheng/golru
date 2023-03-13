@@ -20,7 +20,7 @@ type Stringer interface {
 type LRUCache[K comparable, V any] struct {
 	shards   []*LRUCacheShard[K, V]
 	sharding func(key K) uint32
-	pool     sync.Pool
+	pool     *sync.Pool
 
 	capacity uint64
 	size     uint64
@@ -44,7 +44,7 @@ func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
 	m := LRUCache[K, V]{
 		sharding: sharding,
 		shards:   make([]*LRUCacheShard[K, V], SHARD_COUNT),
-		pool: sync.Pool{
+		pool: &sync.Pool{
 			New: func() any {
 				return &node[K, V]{
 					lock:       new(sync.RWMutex),
@@ -127,6 +127,7 @@ func deleteOldestNodeInCache[K comparable, V any](cache *LRUCache[K, V]) *node[K
 
 	if curNode != nil {
 		curNode.CutOff()
+		cache.pool.Put(curNode)
 		delete(curShard.items, curNode.Key())
 	}
 
@@ -172,7 +173,10 @@ func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, c
 		}
 
 		delta = 1
-		n = newNode(key, value, expire)
+		n = m.pool.Get().(*node[K, V])
+		n.key = key
+		n.SetValWithExpire(value, expire)
+		//n = newNode(key, value, expire)
 	} else {
 		n.CutOff()
 		n.SetValWithExpire(value, expire)
@@ -207,6 +211,7 @@ func (m *LRUCache[K, V]) delete(index uint, key K, cb RemoveCb[K, V]) (V, bool) 
 	if remove && ok {
 		delta = -1
 		n.CutOff()
+		m.pool.Put(n)
 		delete(shard.items, key)
 	}
 
