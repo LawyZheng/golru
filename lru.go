@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-var SHARD_COUNT = 32
+var SHARD_COUNT = 256
 
 type Stringer interface {
 	fmt.Stringer
@@ -18,9 +18,10 @@ type Stringer interface {
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (SHARD_COUNT) map shards.
 type LRUCache[K comparable, V any] struct {
-	shards   []*LRUCacheShard[K, V]
-	sharding func(key K) uint32
-	pool     *sync.Pool
+	shards    []*LRUCacheShard[K, V]
+	shardMask uint64
+	sharding  func(key K) uint64
+	pool      *sync.Pool
 
 	capacity uint64
 	size     uint64
@@ -35,15 +36,16 @@ type LRUCacheShard[K comparable, V any] struct {
 
 func createShard[K comparable, V any]() *LRUCacheShard[K, V] {
 	return &LRUCacheShard[K, V]{
-		items:      make(map[K]*node[K, V]),
+		items:      make(map[K]*node[K, V], 10),
 		linkedList: newDoubleLinkedList[K, V](),
 	}
 }
 
-func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
+func create[K comparable, V any](sharding func(key K) uint64) LRUCache[K, V] {
 	m := LRUCache[K, V]{
-		sharding: sharding,
-		shards:   make([]*LRUCacheShard[K, V], SHARD_COUNT),
+		sharding:  sharding,
+		shardMask: uint64(SHARD_COUNT - 1),
+		shards:    make([]*LRUCacheShard[K, V], SHARD_COUNT),
 		pool: &sync.Pool{
 			New: func() any {
 				return &node[K, V]{
@@ -61,22 +63,22 @@ func create[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
 
 // Creates a new concurrent map.
 func New[V any]() LRUCache[string, V] {
-	return create[string, V](fnv32)
+	return create[string, V](fnv64a)
 }
 
 // Creates a new concurrent map.
 func NewStringer[K Stringer, V any]() LRUCache[K, V] {
-	return create[K, V](strfnv32[K])
+	return create[K, V](strfnv64a[K])
 }
 
 // Creates a new concurrent map.
-func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint32) LRUCache[K, V] {
+func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint64) LRUCache[K, V] {
 	return create[K, V](sharding)
 }
 
 type setCallBack[V any] func(exist bool, valueInMap V, newValue V) (res V, stop bool)
 
-func (m *LRUCache[K, V]) get(index uint, key K, update bool) (V, bool) {
+func (m *LRUCache[K, V]) get(index uint64, key K, update bool) (V, bool) {
 	// Get map shard.
 	shard := m.shards[index]
 
@@ -137,7 +139,7 @@ func deleteOldestNodeInCache[K comparable, V any](cache *LRUCache[K, V]) *node[K
 	return curNode
 }
 
-func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, cb setCallBack[V]) V {
+func (m *LRUCache[K, V]) set(index uint64, key K, value V, expire time.Duration, cb setCallBack[V]) V {
 	// Get map shard.
 	shard := m.shards[index]
 	shard.Lock()
@@ -189,7 +191,7 @@ func (m *LRUCache[K, V]) set(index uint, key K, value V, expire time.Duration, c
 	return value
 }
 
-func (m *LRUCache[K, V]) delete(index uint, key K, cb RemoveCb[K, V]) (V, bool) {
+func (m *LRUCache[K, V]) delete(index uint64, key K, cb RemoveCb[K, V]) (V, bool) {
 	// Get map shard.
 	shard := m.shards[index]
 	shard.Lock()
@@ -219,8 +221,8 @@ func (m *LRUCache[K, V]) delete(index uint, key K, cb RemoveCb[K, V]) (V, bool) 
 	return value, remove
 }
 
-func (m *LRUCache[K, V]) getShardIndex(key K) uint {
-	return uint(m.sharding(key)) % uint(SHARD_COUNT)
+func (m *LRUCache[K, V]) getShardIndex(key K) uint64 {
+	return m.sharding(key) & m.shardMask
 }
 
 func (m *LRUCache[K, V]) SetCapacity(capacity uint64) *LRUCache[K, V] {
@@ -539,6 +541,20 @@ func fnv32(key string) uint32 {
 	for i := 0; i < keyLength; i++ {
 		hash *= prime32
 		hash ^= uint32(key[i])
+	}
+	return hash
+}
+
+func strfnv64a[K fmt.Stringer](key K) uint64 {
+	return fnv64a(key.String())
+}
+
+func fnv64a(key string) uint64 {
+	hash := uint64(14695981039346656037)
+	const prime64 = uint64(1099511628211)
+	for i := 0; i < len(key); i++ {
+		hash ^= uint64(key[i])
+		hash *= prime64
 	}
 	return hash
 }

@@ -35,8 +35,8 @@ func BenchmarkItemsInteger(b *testing.B) {
 		m.Items()
 	}
 }
-func directSharding(key uint32) uint32 {
-	return key
+func directSharding(key uint32) uint64 {
+	return uint64(key)
 }
 
 func BenchmarkItemsInt(b *testing.B) {
