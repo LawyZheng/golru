@@ -8,12 +8,18 @@ import (
 	"time"
 )
 
+const (
+	deltaMinor1 uint64 = 18446744073709551615
+)
+
 var SHARD_COUNT = 256
 
 type Stringer interface {
 	fmt.Stringer
 	comparable
 }
+
+type CleanUpCallBack[K comparable, V any] func(key K, value V)
 
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (SHARD_COUNT) map shards.
@@ -22,6 +28,9 @@ type LRUCache[K comparable, V any] struct {
 	shardMask uint64
 	sharding  func(key K) uint64
 	pool      *sync.Pool
+	close     chan struct{}
+	ticker    *time.Ticker
+	cleanUpCb CleanUpCallBack[K, V]
 
 	capacity uint64
 	size     uint64
@@ -46,6 +55,7 @@ func create[K comparable, V any](sharding func(key K) uint64) LRUCache[K, V] {
 		sharding:  sharding,
 		shardMask: uint64(SHARD_COUNT - 1),
 		shards:    make([]*LRUCacheShard[K, V], SHARD_COUNT),
+		close:     make(chan struct{}),
 		pool: &sync.Pool{
 			New: func() any {
 				return &node[K, V]{
@@ -133,8 +143,7 @@ func deleteOldestNodeInCache[K comparable, V any](cache *LRUCache[K, V]) *node[K
 		delete(curShard.items, curNode.Key())
 	}
 
-	delta := -1
-	atomic.AddUint64(&cache.size, uint64(delta))
+	atomic.AddUint64(&cache.size, deltaMinor1)
 	curShard.Unlock()
 	return curNode
 }
@@ -146,7 +155,7 @@ func (m *LRUCache[K, V]) set(index uint64, key K, value V, expire time.Duration,
 	defer shard.Unlock()
 
 	var (
-		delta int64
+		delta uint64
 		n     *node[K, V]
 		ok    bool
 	)
@@ -186,7 +195,7 @@ func (m *LRUCache[K, V]) set(index uint64, key K, value V, expire time.Duration,
 
 	shard.items[key] = n
 	shard.linkedList.Prepend(n)
-	atomic.AddUint64(&m.size, uint64(delta))
+	atomic.AddUint64(&m.size, delta)
 
 	return value
 }
@@ -198,7 +207,7 @@ func (m *LRUCache[K, V]) delete(index uint64, key K, cb RemoveCb[K, V]) (V, bool
 	defer shard.Unlock()
 
 	var (
-		delta  int64
+		delta  uint64
 		remove = true
 		value  V
 	)
@@ -211,14 +220,84 @@ func (m *LRUCache[K, V]) delete(index uint64, key K, cb RemoveCb[K, V]) (V, bool
 	}
 
 	if remove && ok {
-		delta = -1
+		delta = deltaMinor1
 		n.CutOff()
 		m.pool.Put(n)
 		delete(shard.items, key)
 	}
 
-	atomic.AddUint64(&m.size, uint64(delta))
+	atomic.AddUint64(&m.size, delta)
 	return value, remove
+}
+
+func (m *LRUCache[K, V]) cleanUp() {
+	var wg sync.WaitGroup
+	for i := 0; i < SHARD_COUNT; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			shard := m.shards[index]
+			shard.Lock()
+
+			for k, v := range shard.items {
+				if v == nil {
+					delete(shard.items, k)
+					continue
+				}
+
+				if !v.IsExpire() {
+					continue
+				}
+
+				val := v.Val()
+				v.CutOff()
+				m.pool.Put(v)
+				delete(shard.items, k)
+				atomic.AddUint64(&m.size, deltaMinor1)
+
+				if m.cleanUpCb != nil {
+					m.cleanUpCb(k, val)
+				}
+
+			}
+			shard.Unlock()
+		}(i)
+	}
+	wg.Wait()
+}
+func (m *LRUCache[K, V]) Close() error {
+	close(m.close)
+	return nil
+}
+
+func (m *LRUCache[K, V]) SetCleanUp(interval time.Duration, callback CleanUpCallBack[K, V]) {
+	m.cleanUpCb = callback
+
+	if interval <= 0 {
+		if m.ticker != nil {
+			m.ticker.Stop()
+		}
+		return
+	}
+
+	if m.ticker == nil {
+		m.ticker = time.NewTicker(interval)
+	} else {
+		m.close <- struct{}{}
+		m.ticker.Reset(interval)
+	}
+
+	go func() {
+		for {
+			select {
+			case <-m.ticker.C:
+				m.cleanUp()
+			case <-m.close:
+				m.ticker.Stop()
+				return
+			}
+		}
+	}()
 }
 
 func (m *LRUCache[K, V]) getShardIndex(key K) uint64 {
@@ -456,30 +535,30 @@ type IterCb[K comparable, V any] func(key K, v V)
 // Callback based iterator, cheapest way to read
 // all elements in a map.
 func (m LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
-	for item := range m.IterBuffered() {
-		fn(item.Key, item.Val)
-	}
-
-	//for idx := range m.shards {
-	//	shard := (m.shards)[idx]
-	//	shard.RLock()
-	//	for key, n := range shard.items {
-	//		if n == nil {
-	//			continue
-	//		}
-	//
-	//		if n.IsExpire() {
-	//			continue
-	//		}
-	//
-	//		var value V
-	//		if n != nil {
-	//			value = n.Val()
-	//		}
-	//		fn(key, value)
-	//	}
-	//	shard.RUnlock()
+	//for item := range m.IterBuffered() {
+	//	fn(item.Key, item.Val)
 	//}
+
+	for idx := range m.shards {
+		shard := (m.shards)[idx]
+		shard.RLock()
+		for key, n := range shard.items {
+			if n == nil {
+				continue
+			}
+
+			if n.IsExpire() {
+				continue
+			}
+
+			var value V
+			if n != nil {
+				value = n.Val()
+			}
+			fn(key, value)
+		}
+		shard.RUnlock()
+	}
 }
 
 // Keys returns all keys as []string
