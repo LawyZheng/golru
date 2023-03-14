@@ -16,7 +16,7 @@ type Animal struct {
 }
 
 func TestMapCreation(t *testing.T) {
-	m := New[string]()
+	m := New[string](0)
 	if m.shards == nil {
 		t.Error("map is null.")
 	}
@@ -27,7 +27,7 @@ func TestMapCreation(t *testing.T) {
 }
 
 func TestInsert(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 	elephant := Animal{"elephant"}
 	monkey := Animal{"monkey"}
 
@@ -40,7 +40,7 @@ func TestInsert(t *testing.T) {
 }
 
 func TestInsertAbsent(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 	elephant := Animal{"elephant"}
 	monkey := Animal{"monkey"}
 
@@ -51,7 +51,7 @@ func TestInsertAbsent(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Get a missing element.
 	val, ok := m.Get("Money")
@@ -79,7 +79,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestHas(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Get a missing element.
 	if m.Has("Money") == true {
@@ -95,7 +95,7 @@ func TestHas(t *testing.T) {
 }
 
 func TestRemove(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	monkey := Animal{"monkey"}
 	m.Set("monkey", monkey)
@@ -121,7 +121,7 @@ func TestRemove(t *testing.T) {
 }
 
 func TestRemoveCb(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	monkey := Animal{"monkey"}
 	m.Set("monkey", monkey)
@@ -209,7 +209,7 @@ func TestRemoveCb(t *testing.T) {
 }
 
 func TestPop(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	monkey := Animal{"monkey"}
 	m.Set("monkey", monkey)
@@ -242,7 +242,7 @@ func TestPop(t *testing.T) {
 }
 
 func TestCount(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 	for i := 0; i < 100; i++ {
 		m.Set(strconv.Itoa(i), Animal{strconv.Itoa(i)})
 	}
@@ -253,7 +253,7 @@ func TestCount(t *testing.T) {
 }
 
 func TestIsEmpty(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	if m.IsEmpty() == false {
 		t.Error("new map should be empty")
@@ -267,7 +267,7 @@ func TestIsEmpty(t *testing.T) {
 }
 
 func TestIterator(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	for i := 0; i < 100; i++ {
@@ -291,7 +291,7 @@ func TestIterator(t *testing.T) {
 }
 
 func TestBufferedIterator(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	for i := 0; i < 100; i++ {
@@ -315,7 +315,7 @@ func TestBufferedIterator(t *testing.T) {
 }
 
 func TestClear(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	for i := 0; i < 100; i++ {
@@ -330,7 +330,7 @@ func TestClear(t *testing.T) {
 }
 
 func TestIterCb(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	for i := 0; i < 100; i++ {
@@ -348,7 +348,7 @@ func TestIterCb(t *testing.T) {
 }
 
 func TestItems(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	for i := 0; i < 100; i++ {
@@ -363,7 +363,7 @@ func TestItems(t *testing.T) {
 }
 
 func TestConcurrent(t *testing.T) {
-	m := New[int]()
+	m := New[int](0)
 	ch := make(chan int)
 	const iterations = 1000
 	var a [iterations]int
@@ -424,10 +424,10 @@ func TestConcurrent(t *testing.T) {
 func TestJsonMarshal(t *testing.T) {
 	SHARD_COUNT = 2
 	defer func() {
-		SHARD_COUNT = 32
+		SHARD_COUNT = 256
 	}()
 	expected := "{\"a\":1,\"b\":2}"
-	m := New[int]()
+	m := New[int](0)
 	m.Set("a", 1)
 	m.Set("b", 2)
 	j, err := json.Marshal(m)
@@ -442,7 +442,7 @@ func TestJsonMarshal(t *testing.T) {
 }
 
 func TestKeys(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	for i := 0; i < 100; i++ {
@@ -460,7 +460,7 @@ func TestMInsert(t *testing.T) {
 		"elephant": {"elephant"},
 		"monkey":   {"monkey"},
 	}
-	m := New[Animal]()
+	m := New[Animal](0)
 	m.MSet(animals)
 
 	if m.Count() != 2 {
@@ -496,7 +496,7 @@ func TestUpsert(t *testing.T) {
 		return valueInMap
 	}
 
-	m := New[Animal]()
+	m := New[Animal](0)
 	m.Set("marine", dolphin)
 	m.Upsert("marine", whale, cb)
 	m.Upsert("predator", tiger, cb)
@@ -518,7 +518,7 @@ func TestUpsert(t *testing.T) {
 }
 
 func TestKeysWhenRemoving(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 
 	// Insert 100 elements.
 	Total := 100
@@ -542,7 +542,7 @@ func TestKeysWhenRemoving(t *testing.T) {
 }
 
 func TestUnDrainedIter(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 	// Insert 100 elements.
 	Total := 100
 	for i := 0; i < Total; i++ {
@@ -594,7 +594,7 @@ func TestUnDrainedIter(t *testing.T) {
 }
 
 func TestUnDrainedIterBuffered(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 	// Insert 100 elements.
 	Total := 100
 	for i := 0; i < Total; i++ {
@@ -646,7 +646,7 @@ func TestUnDrainedIterBuffered(t *testing.T) {
 }
 
 func TestLRUCacheExpire(t *testing.T) {
-	m := New[Animal]()
+	m := New[Animal](0)
 	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
 
 	if _, ok := m.Get("monkey"); !ok {
@@ -663,10 +663,14 @@ func TestLRUCacheExpire(t *testing.T) {
 }
 
 func TestLRUCacheNodeMove(t *testing.T) {
-	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint32 {
+	SHARD_COUNT = 1
+	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint64 {
 		return 0
+	}, 0)
+	m.SetCleanUp(5*time.Second, func(key string, value Animal) {
+		fmt.Printf("Key = %s; Value = %v\n", key, value)
 	})
-	m.capacity = 1
+	m.capacity = 5
 	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
 	m.SetWithExpire("dog", Animal{name: "dog"}, time.Second)
 	m.SetWithExpire("pig", Animal{name: "pig"}, time.Second)
@@ -675,15 +679,28 @@ func TestLRUCacheNodeMove(t *testing.T) {
 	//m.Set("pig", Animal{name: "pig"})
 	fmt.Println(m.shards[0].linkedList.String())
 
-	fmt.Println(m.Get("dog"))
-	fmt.Println(m.Get("pig"))
-	time.Sleep(time.Second)
-	fmt.Println(m.Get("pig"))
-
-	m.Set("pig", Animal{name: "pignew"})
-	fmt.Println(m.Get("dog"))
-	fmt.Println(m.Get("pig"))
+	// expired
+	time.Sleep(2 * time.Second)
 	fmt.Println(m.shards[0].linkedList.String())
+
+	// cleaned
+	time.Sleep(10 * time.Second)
+	fmt.Println(m.shards[0].linkedList.String())
+
+	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
+	m.SetWithExpire("dog", Animal{name: "dog"}, time.Second)
+	m.SetWithExpire("pig", Animal{name: "pig"}, time.Second)
+	m.SetCleanUp(0, func(key string, value Animal) {
+		fmt.Printf("New Function: Key = %s; Value = %v\n", key, value)
+	})
+	fmt.Println(m.shards[0].linkedList.String())
+	time.Sleep(10 * time.Second)
+	fmt.Println(m.shards[0].linkedList.String())
+
+	//m.Set("pig", Animal{name: "pignew"})
+	//fmt.Println(m.Get("dog"))
+	//fmt.Println(m.Get("pig"))
+	//fmt.Println(m.shards[0].linkedList.String())
 
 	//m.Remove("pig")
 
@@ -692,11 +709,11 @@ func TestLRUCacheNodeMove(t *testing.T) {
 }
 
 func TestLRUSufficient(t *testing.T) {
-	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint32 {
+	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint64 {
 		i, _ := strconv.Atoi(key)
-		return uint32(i % SHARD_COUNT)
-	})
-	m.SetCapacity(32)
+		return uint64(i % SHARD_COUNT)
+	}, 0)
+	m.SetCapacity(16)
 
 	for i := 0; i < SHARD_COUNT; i++ {
 		m.Set(strconv.Itoa(i), Animal{name: strconv.Itoa(i)})
@@ -705,9 +722,9 @@ func TestLRUSufficient(t *testing.T) {
 	m.Get("29")
 
 	var wg sync.WaitGroup
-	for i := 1; i < SHARD_COUNT; i++ {
+	for i := 1; i < SHARD_COUNT*4; i++ {
 		wg.Add(1)
-		num := i * SHARD_COUNT
+		num := i * 1
 		go func(num int) {
 			defer wg.Done()
 			m.Set(strconv.Itoa(num), Animal{name: strconv.Itoa(num)})

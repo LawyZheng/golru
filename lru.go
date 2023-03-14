@@ -43,14 +43,14 @@ type LRUCacheShard[K comparable, V any] struct {
 	sync.RWMutex // Read Write mutex, guards access to internal map.
 }
 
-func createShard[K comparable, V any]() *LRUCacheShard[K, V] {
+func createShard[K comparable, V any](size int) *LRUCacheShard[K, V] {
 	return &LRUCacheShard[K, V]{
-		items:      make(map[K]*node[K, V], 10),
+		items:      make(map[K]*node[K, V], size),
 		linkedList: newDoubleLinkedList[K, V](),
 	}
 }
 
-func create[K comparable, V any](sharding func(key K) uint64) LRUCache[K, V] {
+func create[K comparable, V any](sharding func(key K) uint64, initialSize int) LRUCache[K, V] {
 	m := LRUCache[K, V]{
 		sharding:  sharding,
 		shardMask: uint64(SHARD_COUNT - 1),
@@ -65,25 +65,31 @@ func create[K comparable, V any](sharding func(key K) uint64) LRUCache[K, V] {
 			},
 		},
 	}
+
+	shardSize := 10
+	if s := initialSize / SHARD_COUNT; s >= shardSize {
+		shardSize = s
+	}
+
 	for i := 0; i < SHARD_COUNT; i++ {
-		m.shards[i] = createShard[K, V]()
+		m.shards[i] = createShard[K, V](shardSize)
 	}
 	return m
 }
 
 // Creates a new concurrent map.
-func New[V any]() LRUCache[string, V] {
-	return create[string, V](fnv64a)
+func New[V any](initialSize int) LRUCache[string, V] {
+	return create[string, V](fnv64a, initialSize)
 }
 
 // Creates a new concurrent map.
-func NewStringer[K Stringer, V any]() LRUCache[K, V] {
-	return create[K, V](strfnv64a[K])
+func NewStringer[K Stringer, V any](initialSize int) LRUCache[K, V] {
+	return create[K, V](strfnv64a[K], initialSize)
 }
 
 // Creates a new concurrent map.
-func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint64) LRUCache[K, V] {
-	return create[K, V](sharding)
+func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint64, initialSize int) LRUCache[K, V] {
+	return create[K, V](sharding, initialSize)
 }
 
 type setCallBack[V any] func(exist bool, valueInMap V, newValue V) (res V, stop bool)
