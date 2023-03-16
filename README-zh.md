@@ -1,4 +1,4 @@
-# GoLRU Cache [![Build Status](https://travis-ci.com/orcaman/concurrent-map.svg?branch=master)](https://travis-ci.com/orcaman/concurrent-map)
+# GoLRU Cache [![Build Status](https://api.travis-ci.com/LawyZheng/golru.svg?branch=master)]()
 
 基于 [Concurrent-Map](http://github.com/orcaman/concurrent-map)实现的一个轻量级高性能LRU缓存库。该缓存库有如下特点：
 - [X] 近似LRU缓存算法。

@@ -1,4 +1,4 @@
-# GoLRU Cache [![Build Status](https://travis-ci.com/orcaman/concurrent-map.svg?branch=master)](https://travis-ci.com/orcaman/concurrent-map)
+# GoLRU Cache [![Build Status](https://api.travis-ci.com/LawyZheng/golru.svg?branch=master)]()
 
 A light, high performance LRU cache package for Go, based on [Concurrent-Map](http://github.com/orcaman/concurrent-map). This package have features as followed:
 - [X] nearly LRU cache algorithm

@@ -122,7 +122,6 @@ func (n *node[K, V]) CutOff() {
 
 	n.pre = nil
 	n.next = nil
-	return
 }
 
 func (n *node[K, V]) ReadForward(until *node[K, V]) []V {
@@ -163,19 +162,19 @@ type doubleLinkedList[K comparable, V any] struct {
 	dummyTail *node[K, V]
 }
 
-func (l *doubleLinkedList[K, V]) Head() *node[K, V] {
+func (l *doubleLinkedList[K, V]) Head() (*node[K, V], bool) {
 	if l.dummyHead.next == l.dummyTail {
-		return nil
+		return nil, false
 	} else {
-		return l.dummyHead.next
+		return l.dummyHead.next, true
 	}
 }
 
-func (l *doubleLinkedList[K, V]) Tail() *node[K, V] {
+func (l *doubleLinkedList[K, V]) Tail() (*node[K, V], bool) {
 	if l.dummyTail.pre == l.dummyHead {
-		return nil
+		return nil, false
 	} else {
-		return l.dummyTail.pre
+		return l.dummyTail.pre, true
 	}
 }
 
@@ -193,15 +192,24 @@ func (l *doubleLinkedList[K, V]) Prepend(n *node[K, V]) {
 	l.dummyHead.next = n
 }
 
-func (l *doubleLinkedList[K, V]) Pop() *node[K, V] {
-	n := l.Tail()
-	if n != nil {
-		n.CutOff()
+func (l *doubleLinkedList[K, V]) Pop() (*node[K, V], bool) {
+	n, ok := l.Tail()
+	if !ok {
+		return n, ok
 	}
-	return n
+	n.CutOff()
+	return n, ok
 }
 
 func (l *doubleLinkedList[K, V]) String() string {
-	data := l.dummyHead.next.ReadForward(l.dummyTail)
+	data := l.ReadForward()
 	return fmt.Sprintf("%v", data)
+}
+
+func (l *doubleLinkedList[K, V]) ReadForward() []V {
+	return l.dummyHead.next.ReadForward(l.dummyTail)
+}
+
+func (l *doubleLinkedList[K, V]) ReadBackward() []V {
+	return l.dummyTail.pre.ReadBackward(l.dummyHead)
 }

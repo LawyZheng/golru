@@ -50,8 +50,8 @@ func createShard[K comparable, V any](size int) *LRUCacheShard[K, V] {
 	}
 }
 
-func create[K comparable, V any](sharding func(key K) uint64, initialSize int) LRUCache[K, V] {
-	m := LRUCache[K, V]{
+func create[K comparable, V any](sharding func(key K) uint64, initialSize int) *LRUCache[K, V] {
+	m := &LRUCache[K, V]{
 		sharding:  sharding,
 		shardMask: uint64(SHARD_COUNT - 1),
 		shards:    make([]*LRUCacheShard[K, V], SHARD_COUNT),
@@ -78,17 +78,17 @@ func create[K comparable, V any](sharding func(key K) uint64, initialSize int) L
 }
 
 // Creates a new concurrent map.
-func New[V any](initialSize int) LRUCache[string, V] {
+func New[V any](initialSize int) *LRUCache[string, V] {
 	return create[string, V](fnv64a, initialSize)
 }
 
 // Creates a new concurrent map.
-func NewStringer[K Stringer, V any](initialSize int) LRUCache[K, V] {
+func NewStringer[K Stringer, V any](initialSize int) *LRUCache[K, V] {
 	return create[K, V](strfnv64a[K], initialSize)
 }
 
 // Creates a new concurrent map.
-func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint64, initialSize int) LRUCache[K, V] {
+func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint64, initialSize int) *LRUCache[K, V] {
 	return create[K, V](sharding, initialSize)
 }
 
@@ -128,11 +128,11 @@ func (m *LRUCache[K, V]) get(index uint64, key K, update bool) (V, bool) {
 func deleteOldestNodeInCache[K comparable, V any](cache *LRUCache[K, V]) *node[K, V] {
 	curShard := cache.shards[0]
 	curShard.Lock()
-	curNode := curShard.linkedList.Tail()
+	curNode, _ := curShard.linkedList.Tail()
 
 	for i := 1; i < SHARD_COUNT; i++ {
 		cache.shards[i].Lock()
-		tmpNode := cache.shards[i].linkedList.Tail()
+		tmpNode, _ := cache.shards[i].linkedList.Tail()
 		if curNode != nil && curNode.Before(tmpNode) {
 			cache.shards[i].Unlock()
 			continue
@@ -521,7 +521,7 @@ func fanIn[K comparable, V any](chans []chan *node[K, V], out chan Tuple[K, V]) 
 }
 
 // Items returns all items as map[string]V
-func (m LRUCache[K, V]) Items() map[K]V {
+func (m *LRUCache[K, V]) Items() map[K]V {
 	tmp := make(map[K]V)
 
 	// Insert items to temporary map.
@@ -540,7 +540,7 @@ type IterCb[K comparable, V any] func(key K, v V)
 
 // Callback based iterator, cheapest way to read
 // all elements in a map.
-func (m LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
+func (m *LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
 	//for item := range m.IterBuffered() {
 	//	fn(item.Key, item.Val)
 	//}
@@ -568,14 +568,14 @@ func (m LRUCache[K, V]) IterCb(fn IterCb[K, V]) {
 }
 
 // Keys returns all keys as []string
-func (m LRUCache[K, V]) Keys() []K {
+func (m *LRUCache[K, V]) Keys() []K {
 	count := m.Count()
 	ch := make(chan K, count)
 	go func() {
 		// Foreach shard.
 		wg := sync.WaitGroup{}
 		wg.Add(SHARD_COUNT)
-		for _, shard := range m.shards {
+		for i := range m.shards {
 			go func(shard *LRUCacheShard[K, V]) {
 				// Foreach key, value pair.
 				shard.RLock()
@@ -590,7 +590,7 @@ func (m LRUCache[K, V]) Keys() []K {
 				}
 				shard.RUnlock()
 				wg.Done()
-			}(shard)
+			}(m.shards[i])
 		}
 		wg.Wait()
 		close(ch)
@@ -605,7 +605,7 @@ func (m LRUCache[K, V]) Keys() []K {
 }
 
 // Reviles LRUCache "private" variables to json marshal.
-func (m LRUCache[K, V]) MarshalJSON() ([]byte, error) {
+func (m *LRUCache[K, V]) MarshalJSON() ([]byte, error) {
 	// Create a temporary map, which will hold all item spread across shards.
 	tmp := make(map[K]V)
 
@@ -614,20 +614,6 @@ func (m LRUCache[K, V]) MarshalJSON() ([]byte, error) {
 		tmp[item.Key] = item.Val
 	}
 	return json.Marshal(tmp)
-}
-func strfnv32[K fmt.Stringer](key K) uint32 {
-	return fnv32(key.String())
-}
-
-func fnv32(key string) uint32 {
-	hash := uint32(2166136261)
-	const prime32 = uint32(16777619)
-	keyLength := len(key)
-	for i := 0; i < keyLength; i++ {
-		hash *= prime32
-		hash ^= uint32(key[i])
-	}
-	return hash
 }
 
 func strfnv64a[K fmt.Stringer](key K) uint64 {

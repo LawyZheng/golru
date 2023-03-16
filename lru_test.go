@@ -2,8 +2,7 @@ package golru
 
 import (
 	"encoding/json"
-	"fmt"
-	"hash/fnv"
+	"reflect"
 	"sort"
 	"strconv"
 	"sync"
@@ -468,20 +467,6 @@ func TestMInsert(t *testing.T) {
 	}
 }
 
-func TestFnv32(t *testing.T) {
-	key := []byte("ABC")
-
-	hasher := fnv.New32()
-	_, err := hasher.Write(key)
-	if err != nil {
-		t.Errorf(err.Error())
-	}
-	if fnv32(string(key)) != hasher.Sum32() {
-		t.Errorf("Bundled fnv32 produced %d, expected result from hash/fnv32 is %d", fnv32(string(key)), hasher.Sum32())
-	}
-
-}
-
 func TestUpsert(t *testing.T) {
 	dolphin := Animal{"dolphin"}
 	whale := Animal{"whale"}
@@ -529,9 +514,9 @@ func TestKeysWhenRemoving(t *testing.T) {
 	// Remove 10 elements concurrently.
 	Num := 10
 	for i := 0; i < Num; i++ {
-		go func(c *LRUCache[string, Animal], n int) {
-			c.Remove(strconv.Itoa(n))
-		}(&m, i)
+		go func(n int) {
+			m.Remove(strconv.Itoa(n))
+		}(i)
 	}
 	keys := m.Keys()
 	for _, k := range keys {
@@ -662,81 +647,115 @@ func TestLRUCacheExpire(t *testing.T) {
 
 }
 
-func TestLRUCacheNodeMove(t *testing.T) {
-	SHARD_COUNT = 1
+func TestLRUCache_NodeMove(t *testing.T) {
 	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint64 {
 		return 0
 	}, 0)
-	m.SetCleanUp(5*time.Second, func(key string, value Animal) {
-		fmt.Printf("Key = %s; Value = %v\n", key, value)
-	})
-	m.capacity = 5
-	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
-	m.SetWithExpire("dog", Animal{name: "dog"}, time.Second)
-	m.SetWithExpire("pig", Animal{name: "pig"}, time.Second)
-	//m.Set("monkey", Animal{name: "monkey"})
-	//m.Set("dog", Animal{name: "dog"})
-	//m.Set("pig", Animal{name: "pig"})
-	fmt.Println(m.shards[0].linkedList.String())
+	monkey := Animal{name: "monkey"}
+	dog := Animal{name: "dog"}
+	pig := Animal{name: "pig"}
 
-	// expired
-	time.Sleep(2 * time.Second)
-	fmt.Println(m.shards[0].linkedList.String())
+	m.Set("monkey", monkey)
+	m.Set("dog", dog)
+	m.Set("pig", pig)
 
-	// cleaned
-	time.Sleep(10 * time.Second)
-	fmt.Println(m.shards[0].linkedList.String())
+	shard := m.shards[0]
 
-	m.SetWithExpire("monkey", Animal{name: "monkey"}, time.Second)
-	m.SetWithExpire("dog", Animal{name: "dog"}, time.Second)
-	m.SetWithExpire("pig", Animal{name: "pig"}, time.Second)
-	m.SetCleanUp(0, func(key string, value Animal) {
-		fmt.Printf("New Function: Key = %s; Value = %v\n", key, value)
-	})
-	fmt.Println(m.shards[0].linkedList.String())
-	time.Sleep(10 * time.Second)
-	fmt.Println(m.shards[0].linkedList.String())
+	targetList := []Animal{monkey, dog, pig}
+	if got := shard.linkedList.ReadBackward(); !reflect.DeepEqual(targetList, got) {
+		t.Errorf("expect linked node should be %v, but got %v", targetList, got)
+		return
+	}
 
-	//m.Set("pig", Animal{name: "pignew"})
-	//fmt.Println(m.Get("dog"))
-	//fmt.Println(m.Get("pig"))
-	//fmt.Println(m.shards[0].linkedList.String())
+	d, ok := m.Get("dog")
+	if !ok {
+		t.Error("expect get true, but got false")
+		return
+	}
 
-	//m.Remove("pig")
+	if !reflect.DeepEqual(d, dog) {
+		t.Errorf("expect get dog, but got %v", d)
+		return
+	}
 
-	fmt.Println("size: ", m.size)
-	fmt.Println("count: ", m.Count())
+	targetList = []Animal{dog, pig, monkey}
+	if got := shard.linkedList.ReadForward(); !reflect.DeepEqual(got, targetList) {
+		t.Errorf("expect get %v, but got %v", targetList, got)
+	}
 }
 
-func TestLRUSufficient(t *testing.T) {
+func TestLRUCache_AutoDelete(t *testing.T) {
+	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint64 {
+		return 0
+	}, 0)
+	m.SetCleanUp(3*time.Second, nil)
+
+	shard := m.shards[0]
+	monkey := Animal{name: "monkey"}
+	dog := Animal{name: "dog"}
+
+	m.SetWithExpire("monkey", monkey, time.Second)
+	m.Set("dog", dog)
+
+	time.Sleep(time.Second)
+	targetList := []Animal{dog, monkey}
+	shard.Lock()
+	if got := shard.linkedList.ReadForward(); !reflect.DeepEqual(got, targetList) {
+		t.Errorf("expect linked list should be %v, but got %v", targetList, got)
+		return
+	}
+	shard.Unlock()
+
+	time.Sleep(5 * time.Second)
+	targetList = []Animal{dog}
+	shard.Lock()
+	if got := shard.linkedList.ReadForward(); !reflect.DeepEqual(got, targetList) {
+		t.Errorf("expect linked list should be %v, but got %v", targetList, got)
+		return
+	}
+	shard.Unlock()
+
+}
+
+func TestLRUCache_Insufficient(t *testing.T) {
+	length := 258
+	capacity := 256
+
 	m := NewWithCustomShardingFunction[string, Animal](func(key string) uint64 {
 		i, _ := strconv.Atoi(key)
 		return uint64(i % SHARD_COUNT)
 	}, 0)
-	m.SetCapacity(16)
+	m.SetCapacity(uint64(capacity))
 
 	for i := 0; i < SHARD_COUNT; i++ {
 		m.Set(strconv.Itoa(i), Animal{name: strconv.Itoa(i)})
 	}
 
-	m.Get("29")
-
 	var wg sync.WaitGroup
-	for i := 1; i < SHARD_COUNT*4; i++ {
+	for i := capacity; i < length; i++ {
 		wg.Add(1)
-		num := i * 1
 		go func(num int) {
 			defer wg.Done()
 			m.Set(strconv.Itoa(num), Animal{name: strconv.Itoa(num)})
-		}(num)
+		}(i)
 	}
 	wg.Wait()
 
-	for _, shard := range m.shards {
-		fmt.Println(shard.linkedList.String())
+	for i := 0; i < SHARD_COUNT; i++ {
+		shard := m.shards[i]
+		shard.Lock()
+		got := shard.linkedList.ReadForward()
+		var target []Animal
+		if i < length-capacity {
+			target = []Animal{{name: strconv.Itoa(capacity + i)}}
+		} else {
+			target = []Animal{{name: strconv.Itoa(i)}}
+		}
+		if !reflect.DeepEqual(got, target) {
+			t.Errorf("expect linked list should be %v, but got %v", target, got)
+			return
+		}
+		shard.Unlock()
 	}
-
-	fmt.Println("size: ", m.size)
-	fmt.Println("count: ", m.Count())
 
 }
