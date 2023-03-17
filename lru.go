@@ -237,38 +237,62 @@ func (m *LRUCache[K, V]) delete(index uint64, key K, cb RemoveCb[K, V]) (V, bool
 }
 
 func (m *LRUCache[K, V]) cleanUp() {
-	var wg sync.WaitGroup
-	for i := 0; i < SHARD_COUNT; i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			shard := m.shards[index]
-			shard.Lock()
+	chans := make([]chan *node[K, V], SHARD_COUNT)
 
-			for k, v := range shard.items {
+	for i := 0; i < SHARD_COUNT; i++ {
+		go func(index int) {
+			shard := m.shards[index]
+			shard.RLock()
+			defer shard.RUnlock()
+			chans[index] = make(chan *node[K, V], len(shard.items))
+
+			for _, v := range shard.items {
 				if v == nil {
-					delete(shard.items, k)
-					continue
+					panic("empty nil node")
 				}
 
 				if !v.IsExpire() {
 					continue
 				}
-
-				val := v.Val()
-				v.CutOff()
-				m.pool.Put(v)
-				delete(shard.items, k)
-				atomic.AddUint64(&m.size, deltaMinor1)
-
-				if m.cleanUpCb != nil {
-					m.cleanUpCb(k, val)
-				}
-
+				chans[index] <- v
 			}
-			shard.Unlock()
+
+			close(chans[index])
 		}(i)
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(SHARD_COUNT)
+	for i := 0; i < SHARD_COUNT; i++ {
+		go func(index int, ch chan *node[K, V]) {
+			defer wg.Done()
+			for {
+				n, ok := <-ch
+				if !ok {
+					return
+				}
+				var (
+					shard = m.shards[index]
+					val   V
+					key   K
+				)
+				shard.Lock()
+				if n != nil && n.IsExpire() {
+					val = n.Val()
+					key = n.Key()
+					n.CutOff()
+					m.pool.Put(n)
+					delete(shard.items, key)
+					atomic.AddUint64(&m.size, deltaMinor1)
+				}
+				shard.Unlock()
+				if m.cleanUpCb != nil {
+					m.cleanUpCb(key, val)
+				}
+			}
+		}(i, chans[i])
+	}
+
 	wg.Wait()
 }
 func (m *LRUCache[K, V]) Close() error {
