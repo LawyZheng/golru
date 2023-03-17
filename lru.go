@@ -239,11 +239,16 @@ func (m *LRUCache[K, V]) delete(index uint64, key K, cb RemoveCb[K, V]) (V, bool
 func (m *LRUCache[K, V]) cleanUp() {
 	chans := make([]chan *node[K, V], SHARD_COUNT)
 
+	var wg sync.WaitGroup
+	wg.Add(SHARD_COUNT)
 	for i := 0; i < SHARD_COUNT; i++ {
 		go func(index int) {
+			defer wg.Done()
+
 			shard := m.shards[index]
 			shard.RLock()
 			defer shard.RUnlock()
+
 			chans[index] = make(chan *node[K, V], len(shard.items))
 
 			for _, v := range shard.items {
@@ -260,8 +265,8 @@ func (m *LRUCache[K, V]) cleanUp() {
 			close(chans[index])
 		}(i)
 	}
+	wg.Wait()
 
-	var wg sync.WaitGroup
 	wg.Add(SHARD_COUNT)
 	for i := 0; i < SHARD_COUNT; i++ {
 		go func(index int, ch chan *node[K, V]) {
